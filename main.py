@@ -1,22 +1,30 @@
 from models import *
+import tkinter
+import matplotlib.pyplot as mp
 
-VEHICLE_COUNT = 10
+VEHICLE_COUNT = 1
 RSU_COUNT = 6
 TRAFFIC_AUTHORITY_ID = "TA-001"
 
 if __name__ == '__main__':
 
-    ta = TrafficAuthority(TRAFFIC_AUTHORITY_ID)
+    times = []
 
-    for i in range(VEHICLE_COUNT):
-        passwd = Base.generate_random_nonce()
-        r = Base.generate_160bit_key()
-        k = Base.generate_160bit_key()
-        print("Vehicle ID", i)
-        print("r:", r)
-        print("k:", k)
-        vehicle = Vehicle(str(i), passwd, r, k)
-        vehicle.request_registration(ta)
-        print("Temp Id", vehicle.temporal_credential_dash)
-        print("Pseudo Id", vehicle.pseudo_id_dash)
-        print("=====================================")
+    for j in range(100, 1000, 100):
+
+        ta = TrafficAuthority(TRAFFIC_AUTHORITY_ID)
+
+        user_ids = ['user ' + str(i) for i in range(j)]
+        init = time.time()
+
+        for i in range(j):
+            passwd = Base.generate_random_nonce()
+            r = Base.generate_160bit_key()
+            k = Base.generate_160bit_key()
+            vehicle = Vehicle(user_ids[i], str(i), passwd, r, k)
+            vehicle.request_registration(ta)
+
+        fin = time.time()
+        print("Time for", j, "vehicles:", fin - init, "Hashed Computed:", 17 * j, "\tTime/Hash:",
+              (fin - init) / (17 * j))
+        times.append(fin - init)

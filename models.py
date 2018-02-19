@@ -42,19 +42,25 @@ class Base:
         # Returns time since epoch (UTC)
         return str(int(time.time()))
 
+    @staticmethod
+    def hex_transform(x):
+        return ":".join("{:02x}".format(ord(c)) for c in x)
+
 
 class TrafficAuthority(Base):
     def __init__(self, id):
         Base.__init__(self)
         self.id = id
         self.rsu_list = []
+        self.registered_cars = {}
         self.X, self.X_dash = self.generate_1024bit_secret_keys()
 
     def add_rsu(self, rsu):
         rsu.register(self)
         self.rsu_list.append(rsu)
 
-    def register_vehicle(self, vehicle_id, masked_password_xor_k):
+    def register_vehicle(self, vehicle_id, user_id, masked_password_xor_k, registration_time):
+        self.registered_cars[vehicle_id] = registration_time
         pseudo_id = self.hash(vehicle_id + self.X)
         a1 = self.hash(pseudo_id + self.X)
         a2 = self.hash(pseudo_id + a1 + self.id)
@@ -63,9 +69,7 @@ class TrafficAuthority(Base):
         y1 = self.sxor(self.sxor(x, a2), masked_password_xor_k)
         y2 = self.sxor(self.sxor(x_dash, a2), masked_password_xor_k)
         k_v = self.generate_160bit_key()
-
-        # TODO: Add rts_i : registration timestamp of the Vehicle and id_i which is the identity of the user who owns the vehicle
-        temporal_credential = self.hash(k_v + "rts_vi" + "id_i")
+        temporal_credential = self.hash(k_v + str(registration_time) + user_id)
         return pseudo_id, temporal_credential, self.id, y1, y2, a1, a2
 
     # Need to improve this function
@@ -104,8 +108,10 @@ class RSU(Base):
 
 
 class Vehicle(Base):
-    def __init__(self, id, password, r, k):
+    def __init__(self, user_id, id, password, r, k):
         Base.__init__(self)
+        self.registration_time = ''
+        self.user_id = user_id
         self.id = id
         self.password = password
         self.r = r
@@ -120,10 +126,11 @@ class Vehicle(Base):
         self.a4 = ''
 
     def request_registration(self, traffic_authority):
+        self.registration_time = time.time()
         masked_password = self.hash(self.password + self.r)
         masked_password_xor_k = self.sxor(masked_password, self.k)
         pseudo_id, temporal_credential, traffic_authority_id, y1, y2, a1, a2 = traffic_authority.register_vehicle(
-            self.id, masked_password_xor_k)
+            self.id, self.user_id, masked_password_xor_k, self.registration_time)
         self.b = self.sxor(self.hash(self.password + self.id), self.r)
         self.a1_dash = self.sxor(a1, self.hash(self.id + self.r))
         self.traffic_authority_id_dash = self.sxor(self.hash(self.id + self.r), traffic_authority.id)
