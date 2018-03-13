@@ -6,6 +6,7 @@ import os
 
 class Base:
     hash_size = 160
+    delT = 5
 
     def __init__(self):
         pass
@@ -69,13 +70,9 @@ class TrafficAuthority(Base):
     def __init__(self, id):
         Base.__init__(self)
         self.id = id
-        self.rsu_list = []
+        self.registered_rsus = {}
         self.registered_cars = {}
         self.X, self.X_dash = self.generate_1024bit_secret_keys()
-
-    def add_rsu(self, rsu):
-        rsu.register(self)
-        self.rsu_list.append(rsu)
 
     def register_vehicle(self, vehicle_id, masked_password_xor_k, registration_time):
         self.registered_cars[vehicle_id] = registration_time
@@ -90,6 +87,14 @@ class TrafficAuthority(Base):
         temporal_credential = self.hash(k_v + str(registration_time) + vehicle_id, self.hash_size)
         return pseudo_id, temporal_credential, self.id, y1, y2, a1, a2
 
+    def register_rsu(self, registration_time):
+        id = self.byte_to_string(self.generate_random_nonce(self.hash_size))
+        self.registered_rsus[id] = registration_time
+        pseudo_id = self.hash(id + self.X_dash, self.hash_size)
+        x_dash = self.hash(self.id + self.X_dash, self.hash_size)
+        time_dependent_id = self.hash(self.id + registration_time + self.X_dash, self.hash_size)
+        return x_dash, pseudo_id, time_dependent_id
+
     # Need to improve this function
     def generate_1024bit_secret_keys(self):
         x1 = self.generate_key(512)
@@ -100,29 +105,69 @@ class TrafficAuthority(Base):
 
 
 class RSU(Base):
-    def __init__(self, id):
+    def __init__(self):
         Base.__init__(self)
-        self.id = id
         self.pseudo_id = ''
         self.time_dependent_id = ''
         self.secret_key = ''
-        self.registration_time = ''
-        self.traffic_authority = ''
+        self.x_dash = ''
+        self.session_key = ''
 
         # TODO: Implement GF(p) polynomial share via Blundo et al
         self.polynomial_share = ''
 
-    def register(self, traffic_authority):
-        self.registration_time = str(time.time())
-        x, x_dash = traffic_authority.X, traffic_authority.X_dash
-        self.pseudo_id = self.hash(self.id + x_dash, self.hash_size)
-        self.secret_key = self.hash(traffic_authority.id + x_dash, self.hash_size)
-        self.time_dependent_id = self.hash(traffic_authority.id + self.registration_time + x_dash, self.hash_size)
+    def request_registration(self, traffic_authority):
+        registration_time = str(time.time())
+        self.x_dash, self.pseudo_id, self.time_dependent_id = traffic_authority.register_rsu(registration_time)
+
+    def auth_authenticate(self, m1, m2, t1, traffic_authority_id_star):
+
+        # traffic_authority_id_star for RSU valid?
+        t1_star = self.generate_current_timestamp()
+        x, pseudo_id, traffic_authority_id_star = self.x_dash, self.pseudo_id, traffic_authority_id_star
+
+        # Check timeliness of the communication
+        if abs(int(t1_star) - int(t1)) < self.delT:
+            k_x1 = self.hash(x + t1, self.hash_size)
+            d1_dash = self.sxor(k_x1, m1)
+            m3 = self.hash(d1_dash + traffic_authority_id_star + t1, self.hash_size)
+
+            # Check if m3 == m2
+            if m3 == m2:
+                r2 = self.byte_to_string(self.generate_random_nonce(self.hash_size))
+                t2 = self.generate_current_timestamp()
+                k_x2 = self.hash(x + t2, self.hash_size)
+                d2 = self.hash(r2 + pseudo_id + t1 + t2, self.hash_size)
+                m4 = self.sxor(k_x2, d2)
+                self.session_key = self.hash(
+                    self.hash(x + t1 + t2, self.hash_size) + d1_dash + d2 + traffic_authority_id_star,
+                    self.hash_size)
+                m5 = self.hash(self.session_key + t2, self.hash_size)
+
+                # Return m5,m4,t2 to the other vehicle
+                return m5, m4, t2
+            else:
+                print("Error")
+        else:
+            print("Timeliness failed")
+
+    def auth_receive_ack(self, m7, t3):
+        # Check timeliness
+        t3_star = self.generate_current_timestamp()
+
+        if abs(int(t3_star) - int(t3)) < self.delT:
+            m8 = self.hash(self.session_key + t3, self.hash_size)
+            if m8 == m7:
+                print("Ack Successful for OBU")
+                return True
+
+        return False
 
 
-class OBU(Base):
-    def __init__(self, x, pseudo_id, temporal_credential, traffic_authority_id_star):
+class OBU:
+    def __init__(self, x, x_dash, pseudo_id, temporal_credential, traffic_authority_id_star):
         self.x = x
+        self.x_dash = x_dash
         self.pseudo_id = pseudo_id
         self.temporal_credential = temporal_credential
         self.traffic_authority_id_star = traffic_authority_id_star
@@ -147,7 +192,6 @@ class Vehicle(Base):
         self.a1_dash = ''
         self.a4 = ''
         self.obu = None
-        self.delT = 1000
 
     def request_registration(self, traffic_authority):
         self.registration_time = time.time()
@@ -176,14 +220,14 @@ class Vehicle(Base):
         traffic_authority_id_star = self.sxor(self.traffic_authority_id_dash, self.hash(id + r_star, self.hash_size))
         pseudo_id = self.sxor(self.pseudo_id_dash, self.hash(password + id + r_star, self.hash_size))
         a2_star = self.hash(pseudo_id + a1_star + traffic_authority_id_star, self.hash_size)
-        x = self.sxor(self.sxor(self.y, a2_star),masked_password_star)
+        x = self.sxor(self.sxor(self.y, a2_star), masked_password_star)
         x_dash = self.sxor(self.sxor(self.y_dash, a2_star), masked_password_star)
         a3_star = self.hash(id + masked_password_star + traffic_authority_id_star + a1_star, self.hash_size)
         a4_star = self.hash(a3_star + a2_star, self.hash_size)
         temporal_credential = self.sxor(self.temporal_credential_dash, masked_password_star)
 
         # Set the on board variables
-        self.obu = OBU(x, pseudo_id, temporal_credential, traffic_authority_id_star)
+        self.obu = OBU(x, x_dash, pseudo_id, temporal_credential, traffic_authority_id_star)
 
         if a4_star == self.a4:
             print("Authenticated!")
@@ -191,12 +235,16 @@ class Vehicle(Base):
             print("Can't Authenticate! Could not proceed")
             return
 
-    def v2v_precompute(self, vehicle):
+    def auth_precompute(self, item, auth_type):
         r1 = self.byte_to_string(self.generate_random_nonce(self.hash_size))
         t1 = self.generate_current_timestamp()
 
-        # Retrieve values from OBU
-        x, pseudo_id, temporal_credential, traffic_authority_id_star = self.obu.x, self.obu.pseudo_id, self.obu.temporal_credential, self.obu.traffic_authority_id_star
+        # x is used for v2v and x_dash is used for ch2rsu
+        x, pseudo_id, temporal_credential, traffic_authority_id_star = None, None, None, None
+        if auth_type == 'v2v':
+            x, pseudo_id, temporal_credential, traffic_authority_id_star = self.obu.x, self.obu.pseudo_id, self.obu.temporal_credential, self.obu.traffic_authority_id_star
+        elif auth_type == 'ch2rsu':
+            x, pseudo_id, temporal_credential, traffic_authority_id_star = self.obu.x_dash, self.obu.pseudo_id, self.obu.temporal_credential, self.obu.traffic_authority_id_star
 
         # Time dependent secret key
         # x and x' as used for v2v auth v2rsu auth
@@ -206,47 +254,58 @@ class Vehicle(Base):
         m2 = self.hash(d1 + traffic_authority_id_star + t1, self.hash_size)
 
         # Send v2v auth request using an open channel with <m1,m2,t1>
-        m5, m4, t2 = vehicle.v2v_authenticate(m1, m2, t1)
+        m5, m4, t2 = None, None, None
+        if type(item) == Vehicle:
+            m5, m4, t2 = item.auth_authenticate(m1, m2, t1, auth_type)
+        elif type(item) == RSU:
+            m5, m4, t2 = item.auth_authenticate(m1, m2, t1, traffic_authority_id_star)
 
         # Check timeliness of reply
         t2_star = self.generate_current_timestamp()
 
         if abs(int(t2_star) - int(t2)) < self.delT:
-            k_x2 = self.hash(self.obu.x + t2, self.hash_size)
+            k_x2 = self.hash(x + t2, self.hash_size)
             d2_dash = self.sxor(k_x2, m4)
             self.obu.session_key = self.hash(
-                self.hash(self.obu.x + t1 + t2, self.hash_size) + d1 + d2_dash + self.obu.traffic_authority_id_star,
+                self.hash(x + t1 + t2, self.hash_size) + d1 + d2_dash + traffic_authority_id_star,
                 self.hash_size)
             m6 = self.hash(self.obu.session_key + t2, self.hash_size)
 
             if m6 == m5:
-                print("Authenticated V2V")
+                print("Authenticated", auth_type)
 
                 # Send auth ACK
                 t3 = self.generate_current_timestamp()
                 m7 = self.hash(self.obu.session_key + t3, self.hash_size)
-                ack_status = vehicle.receive_ack(m7, t3)
+                ack_status = item.auth_receive_ack(m7, t3)
                 print(ack_status)
 
-    def v2v_authenticate(self, m1, m2, t1):
+    def auth_authenticate(self, m1, m2, t1, auth_type):
 
         t1_star = self.generate_current_timestamp()
 
+        # Retrieve values from OBU
+        x, pseudo_id, temporal_credential, traffic_authority_id_star = None, None, None, None
+        if auth_type == 'v2v':
+            x, pseudo_id, temporal_credential, traffic_authority_id_star = self.obu.x, self.obu.pseudo_id, self.obu.temporal_credential, self.obu.traffic_authority_id_star
+        elif auth_type == 'ch2rsu':
+            x, pseudo_id, temporal_credential, traffic_authority_id_star = self.obu.x_dash, self.obu.pseudo_id, self.obu.temporal_credential, self.obu.traffic_authority_id_star
+
         # Check timeliness of the communication
         if abs(int(t1_star) - int(t1)) < self.delT:
-            k_x1 = self.hash(self.obu.x + t1, self.hash_size)
+            k_x1 = self.hash(x + t1, self.hash_size)
             d1_dash = self.sxor(k_x1, m1)
-            m3 = self.hash(d1_dash + self.obu.traffic_authority_id_star + t1, self.hash_size)
+            m3 = self.hash(d1_dash + traffic_authority_id_star + t1, self.hash_size)
 
             # Check if m3 == m2
             if m3 == m2:
                 r2 = self.byte_to_string(self.generate_random_nonce(self.hash_size))
                 t2 = self.generate_current_timestamp()
-                k_x2 = self.hash(self.obu.x + t2, self.hash_size)
-                d2 = self.hash(r2 + self.obu.pseudo_id + self.obu.temporal_credential + t1 + t2, self.hash_size)
+                k_x2 = self.hash(x + t2, self.hash_size)
+                d2 = self.hash(r2 + pseudo_id + temporal_credential + t1 + t2, self.hash_size)
                 m4 = self.sxor(k_x2, d2)
                 self.obu.session_key = self.hash(
-                    self.hash(self.obu.x + t1 + t2, self.hash_size) + d1_dash + d2 + self.obu.traffic_authority_id_star,
+                    self.hash(x + t1 + t2, self.hash_size) + d1_dash + d2 + traffic_authority_id_star,
                     self.hash_size)
                 m5 = self.hash(self.obu.session_key + t2, self.hash_size)
 
@@ -257,7 +316,7 @@ class Vehicle(Base):
         else:
             print("Timeliness failed")
 
-    def receive_ack(self, m7, t3):
+    def auth_receive_ack(self, m7, t3):
 
         # Check timeliness
         t3_star = self.generate_current_timestamp()
@@ -265,7 +324,7 @@ class Vehicle(Base):
         if abs(int(t3_star) - int(t3)) < self.delT:
             m8 = self.hash(self.obu.session_key + t3, self.hash_size)
             if m8 == m7:
-                print("Ack Successful")
+                print("Ack Successful for Vehicle")
                 return True
 
         return False
